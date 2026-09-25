@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>視線計測実験</title>
+<script>
+  window.saveDataAcrossSessions = false;
+</script>
+<script src="./webgazer.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { width:100%; height:100%; margin:0; overflow:hidden; background:#000; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+  #app { position:relative; width:100vw; height:100vh; background:#000; }
+  .player { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; background:#000; }
+  #adVideo { display:none; }
+  #skipButton { position:absolute; right:4vw; bottom:8vh; z-index:30; display:none; padding:14px 24px; border:2px solid rgba(255,255,255,.9); border-radius:8px; color:#fff; background:rgba(0,0,0,.78); font-size:18px; font-weight:700; cursor:pointer; }
+  #skipButton:hover { background:rgba(35,35,35,.96); }
+  .overlay { position:fixed; inset:0; z-index:100; display:flex; align-items:center; justify-content:center; background:#f5f5f5; color:#111; }
+  .panel { width:min(760px,90vw); padding:32px; border-radius:18px; background:#fff; box-shadow:0 16px 50px rgba(0,0,0,.14); text-align:center; }
+  .panel h1 { margin:0 0 16px; font-size:30px; }
+  .panel p { line-height:1.8; color:#444; }
+  .primaryButton { margin-top:18px; padding:14px 24px; border:0; border-radius:10px; color:#fff; background:#111; font-size:17px; font-weight:700; cursor:pointer; }
+  .primaryButton:disabled { opacity:.5; cursor:default; }
+  #dependencyStatus { margin:16px auto 0; padding:10px 12px; border-radius:10px; background:#f3f3f3; max-width:620px; font-size:14px; line-height:1.6; }
+  #errorText { margin-top:14px; color:#b00020; white-space:pre-wrap; line-height:1.6; }
+  #calibrationOverlay { display:none; background:#fff; }
+  #calibrationInstruction { position:fixed; left:50%; top:24px; transform:translateX(-50%); z-index:120; padding:10px 16px; border-radius:999px; color:#fff; background:rgba(0,0,0,.78); font-weight:700; pointer-events:none; }
+  #calibrationPoint { position:fixed; z-index:121; width:38px; height:38px; border:5px solid #111; border-radius:50%; background:#fff; transform:translate(-50%,-50%); cursor:crosshair; box-shadow:0 0 0 11px rgba(0,0,0,.08); }
+  #calibrationPoint::after { content:""; position:absolute; left:50%; top:50%; width:8px; height:8px; border-radius:50%; background:#111; transform:translate(-50%,-50%); }
+  #calibrationCounter { position:fixed; right:24px; top:24px; z-index:122; font-weight:700; color:#333; }
+  #finishOverlay { display:none; }
+  #participantIdInput { width:min(360px,80vw); margin-top:8px; padding:12px 14px; border:1px solid #bbb; border-radius:10px; font-size:16px; text-align:center; }
+  #participantIdHelp { margin:8px 0 0; font-size:13px; color:#666; }
+  #uploadStatus { margin:16px auto 0; padding:10px 12px; border-radius:10px; background:#f3f3f3; max-width:620px; font-size:14px; line-height:1.6; white-space:pre-wrap; }
+  .buttonRow { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; }
+  .secondaryButton { margin-top:18px; padding:14px 24px; border:1px solid #888; border-radius:10px; color:#111; background:#fff; font-size:16px; font-weight:700; cursor:pointer; }
+  #retryUploadButton { display:none; }
+  #debugBar { display:none; position:absolute; left:12px; top:12px; z-index:40; color:#fff; background:rgba(0,0,0,.7); padding:6px 9px; border-radius:6px; font-size:12px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <video id="mainVideo" class="player" preload="auto" playsinline src="videos/main.mp4"></video>
+  <video id="adVideo" class="player" preload="auto" playsinline></video>
+  <button id="skipButton" type="button">広告をスキップ</button>
+  <div id="debugBar"></div>
+</div>
+
+<div id="startOverlay" class="overlay">
+  <div class="panel">
+    <h1>視線計測実験</h1>
+    <p>カメラを使用して画面上の視線位置を推定します。<br>最初に9点キャリブレーションを行い、その後動画を再生します。</p>
+    <input id="participantIdInput" type="text" maxlength="100" autocomplete="off" placeholder="参加者IDを入力">
+    <div id="participantIdHelp">指定された参加者IDを入力してください。</div>
+    <div id="dependencyStatus">必要ファイルを確認しています…</div>
+    <button id="cameraButton" class="primaryButton" type="button" disabled>カメラを起動してキャリブレーション</button>
+    <div id="errorText"></div>
+  </div>
+</div>
+
+<div id="calibrationOverlay" class="overlay">
+  <div id="calibrationInstruction">黒い点を見ながら、同じ点を5回クリックしてください</div>
+  <button id="calibrationPoint" type="button" aria-label="キャリブレーション点"></button>
+  <div id="calibrationCounter"></div>
+</div>
+
+<div id="finishOverlay" class="overlay">
+  <div class="panel">
+    <h1>実験終了</h1>
+    <p>実験結果を送信しています。送信が完了するまでこのページを閉じないでください。</p>
+    <div id="uploadStatus">送信準備中…</div>
+    <div class="buttonRow">
+      <button id="retryUploadButton" class="primaryButton" type="button">送信を再試行</button>
+      <button id="downloadButton" class="secondaryButton" type="button">CSVバックアップをダウンロード</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+const CONFIG = {
+  mainVideo: "videos/main.mp4",
+  ads: {
+    start: ["ads/a.mp4","ads/b.mp4","ads/c.mp4"],
+    min3: ["ads/e.mp4","ads/f.mp4","ads/g.mp4"],
+    min6: ["ads/h.mp4","ads/i.mp4","ads/j.mp4"]
+  },
+  adTriggerSeconds: { min3:180, min6:360 },
+  skipAfterSeconds: 5,
+  sampleIntervalMs: 50,
+  calibrationClicksPerPoint: 5,
+  gazeUploadChunkSize: 500,
+
+  // ↓ supabase_test.html で確認済みの値を入れてください
+  supabaseUrl: "https://ehkqkfzeyunamssrkkzb.supabase.co",
+  supabaseKey: "sb_publishable_rnepPw0axgmioIE_ZCVDGA_4RQHVqK0"
+};
+
+const $ = id => document.getElementById(id);
+const mainVideo = $("mainVideo");
+const adVideo = $("adVideo");
+const skipButton = $("skipButton");
+const startOverlay = $("startOverlay");
+const participantIdInput = $("participantIdInput");
+const cameraButton = $("cameraButton");
+const errorText = $("errorText");
+const dependencyStatus = $("dependencyStatus");
+const calibrationOverlay = $("calibrationOverlay");
+const calibrationPoint = $("calibrationPoint");
+const calibrationCounter = $("calibrationCounter");
+const finishOverlay = $("finishOverlay");
+const uploadStatus = $("uploadStatus");
+const retryUploadButton = $("retryUploadButton");
+const downloadButton = $("downloadButton");
+
+let experimentStarted = false;
+let experimentFinished = false;
+let currentPhase = "setup";
+let currentAdSlot = "";
+let currentAdPath = "";
+let currentAdId = "";
+let experimentStartPerf = 0;
+let lastGazeSampleAt = 0;
+let adSkipMonitor = null;
+
+let participantId = "";
+let sessionId = "";
+let startedAtIso = "";
+let finishedAtIso = "";
+
+const adShown = { start:false, min3:false, min6:false };
+const selectedAds = { start:"", min3:"", min6:"" };
+const adResults = {
+  start:{skipped:false, skipTime:null},
+  min3:{skipped:false, skipTime:null},
+  min6:{skipped:false, skipTime:null}
+};
+
+let uploadInProgress = false;
+let uploadComplete = false;
+let participantUploaded = false;
+let uploadedGazeCount = 0;
+
+const dataRows = [];
+const CSV_COLUMNS = [
+  "participant_id","session_id","row_type","event","timestamp_iso","experiment_elapsed_ms","phase","ad_slot","ad_id","content_file",
+  "main_time_sec","media_time_sec","gaze_x_px","gaze_y_px","gaze_x_viewport_norm","gaze_y_viewport_norm",
+  "gaze_x_video_norm","gaze_y_video_norm","gaze_zone","aoi","before_skip_1s","viewport_width","viewport_height",
+  "video_content_left_px","video_content_top_px","video_content_width_px","video_content_height_px","note"
+];
+
+// ---------- 起動前診断 ----------
+(async function preflight() {
+  try {
+    if (!window.isSecureContext) throw new Error("このページは安全な接続ではありません。HTTPS または localhost で開いてください。");
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("このブラウザではカメラAPIが利用できません。Chrome または Edge を使用してください。");
+    if (!window.webgazer) throw new Error("webgazer.js を読み込めません。ファイル配置を確認してください。");
+
+    const required = [
+      "./mediapipe/face_mesh/face_mesh.js",
+      "./mediapipe/face_mesh/face_mesh.binarypb",
+      "./mediapipe/face_mesh/face_mesh_solution_packed_assets.data",
+      "./mediapipe/face_mesh/face_mesh_solution_simd_wasm_bin.wasm",
+      "./mediapipe/face_mesh/face_mesh_solution_wasm_bin.wasm"
+    ];
+    for (const path of required) {
+      const r = await fetch(path, {cache:"no-store"});
+      if (!r.ok) throw new Error(`必要ファイルを読み込めません: ${path} (${r.status})`);
+    }
+    dependencyStatus.textContent = "✓ アイトラッキング用ファイルの確認が完了しました。";
+    cameraButton.disabled = false;
+  } catch (e) {
+    dependencyStatus.textContent = "✕ セットアップが完了していません。";
+    errorText.textContent = `${e.message}\n\n必要ファイルの配置と、HTTPS または localhost で開いているかを確認してください。`;
+  }
+})();
+
+cameraButton.addEventListener("click", async () => {
+  errorText.textContent = "";
+
+  const enteredId = participantIdInput.value.trim();
+  if (!enteredId) {
+    errorText.textContent = "参加者IDを入力してください。";
+    participantIdInput.focus();
+    return;
+  }
+  if (!isSupabaseConfigured()) {
+    errorText.textContent = "Supabase設定が未入力です。index.html の CONFIG.supabaseUrl と CONFIG.supabaseKey を設定してください。";
+    return;
+  }
+
+  participantId = enteredId;
+  participantIdInput.disabled = true;
+  cameraButton.disabled = true;
+  try {
+    // 先にカメラ権限だけ確認し、モデル取得エラーと区別する
+    let testStream;
+    try {
+      testStream = await navigator.mediaDevices.getUserMedia({video:true, audio:false});
+      testStream.getTracks().forEach(t => t.stop());
+    } catch (cameraError) {
+      if (cameraError.name === "NotAllowedError" || cameraError.name === "SecurityError") {
+        throw new Error("カメラ利用が拒否されています。ブラウザのアドレスバー左側のカメラ設定から『許可』に変更してください。");
+      }
+      if (cameraError.name === "NotFoundError") throw new Error("使用できるWebカメラが見つかりませんでした。");
+      throw cameraError;
+    }
+
+    webgazer.setRegression("ridge");
+    webgazer.setGazeListener(handleGaze);
+    await webgazer.begin();
+    if (typeof webgazer.showVideoPreview === "function") webgazer.showVideoPreview(true);
+    if (typeof webgazer.showPredictionPoints === "function") webgazer.showPredictionPoints(true);
+    startOverlay.style.display = "none";
+    startCalibration();
+  } catch (e) {
+    console.error(e);
+    errorText.textContent = `アイトラッキングを開始できませんでした。\n\n${e.message || e}\n\n対処：\n1. Chrome / Edge を使用\n2. カメラを「許可」\n3. 必要ファイルの配置を確認\n4. HTTPS または localhost で開く`;
+    participantIdInput.disabled = false;
+    cameraButton.disabled = false;
+  }
+});
+
+const calibrationPositions = [[10,12],[50,12],[90,12],[10,50],[50,50],[90,50],[10,88],[50,88],[90,88]];
+let calibrationIndex = 0;
+let calibrationClickCount = 0;
+
+function startCalibration() {
+  calibrationIndex = 0;
+  calibrationClickCount = 0;
+  calibrationOverlay.style.display = "block";
+  placeCalibrationPoint();
+}
+function placeCalibrationPoint() {
+  const [x,y] = calibrationPositions[calibrationIndex];
+  calibrationPoint.style.left = x + "%";
+  calibrationPoint.style.top = y + "%";
+  calibrationCounter.textContent = `点 ${calibrationIndex+1} / ${calibrationPositions.length}　クリック ${calibrationClickCount} / ${CONFIG.calibrationClicksPerPoint}`;
+}
+calibrationPoint.addEventListener("click", (ev) => {
+  // WebGazer自身もクリックを学習するが、APIがある場合は明示的にも記録
+  if (typeof webgazer.recordScreenPosition === "function") {
+    webgazer.recordScreenPosition(ev.clientX, ev.clientY, "click");
+  }
+  calibrationClickCount++;
+  if (calibrationClickCount >= CONFIG.calibrationClicksPerPoint) {
+    calibrationIndex++;
+    calibrationClickCount = 0;
+    if (calibrationIndex >= calibrationPositions.length) {
+      finishCalibration();
+      return;
+    }
+  }
+  placeCalibrationPoint();
+});
+
+function finishCalibration() {
+  calibrationOverlay.style.display = "none";
+  if (typeof webgazer.showVideoPreview === "function") webgazer.showVideoPreview(false);
+  if (typeof webgazer.showPredictionPoints === "function") webgazer.showPredictionPoints(false);
+  startExperiment();
+}
+
+function startExperiment() {
+  experimentStarted = true;
+  experimentFinished = false;
+  currentPhase = "setup";
+  experimentStartPerf = performance.now();
+  lastGazeSampleAt = 0;
+
+  sessionId = crypto.randomUUID();
+  startedAtIso = new Date().toISOString();
+  finishedAtIso = "";
+
+  dataRows.length = 0;
+  adShown.start = adShown.min3 = adShown.min6 = false;
+  selectedAds.start = randomChoice(CONFIG.ads.start);
+  selectedAds.min3 = randomChoice(CONFIG.ads.min3);
+  selectedAds.min6 = randomChoice(CONFIG.ads.min6);
+  for (const slot of ["start","min3","min6"]) {
+    adResults[slot].skipped = false;
+    adResults[slot].skipTime = null;
+  }
+
+  uploadInProgress = false;
+  uploadComplete = false;
+  participantUploaded = false;
+  uploadedGazeCount = 0;
+
+  logEvent("experiment_start", `assigned_ads:start=${getAdId(selectedAds.start)},min3=${getAdId(selectedAds.min3)},min6=${getAdId(selectedAds.min6)}`);
+  if (!document.fullscreenElement && document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(()=>{});
+  playAd("start");
+}
+
+async function playAd(slot) {
+  if (adShown[slot]) return;
+  adShown[slot] = true;
+  currentAdSlot = slot;
+  currentAdPath = selectedAds[slot];
+  currentAdId = getAdId(currentAdPath);
+  currentPhase = "ad_" + slot;
+  mainVideo.pause();
+  mainVideo.style.display = "none";
+  adVideo.pause();
+  adVideo.src = currentAdPath;
+  adVideo.currentTime = 0;
+  adVideo.style.display = "block";
+  skipButton.style.display = "none";
+  skipButton.disabled = false;
+  logEvent("ad_start", currentAdPath);
+
+  clearInterval(adSkipMonitor);
+  adSkipMonitor = setInterval(() => {
+    if (!currentPhase.startsWith("ad_")) return;
+    if (adVideo.currentTime >= CONFIG.skipAfterSeconds) skipButton.style.display = "block";
+  }, 50);
+
+  try { await adVideo.play(); }
+  catch(e) { logEvent("ad_play_error", String(e.message || e)); finishAd("play_error"); }
+}
+
+function finishAd(reason) {
+  if (!currentPhase.startsWith("ad_")) return;
+  clearInterval(adSkipMonitor);
+  adSkipMonitor = null;
+
+  const finishedSlot = currentAdSlot;
+  const finishedAd = currentAdId;
+  const adTime = Number.isFinite(adVideo.currentTime) ? adVideo.currentTime : 0;
+
+  if (reason === "skip" && adResults[finishedSlot]) {
+    adResults[finishedSlot].skipped = true;
+    adResults[finishedSlot].skipTime = round3(adTime);
+    markBeforeSkipWindow(finishedSlot, finishedAd, adTime);
+  }
+
+  logEvent(reason === "skip" ? "ad_skip" : "ad_end", `${finishedAd};ad_time=${adTime.toFixed(3)}`);
+  adVideo.pause();
+  adVideo.removeAttribute("src");
+  adVideo.load();
+  adVideo.style.display = "none";
+  skipButton.style.display = "none";
+  currentAdSlot = ""; currentAdPath = ""; currentAdId = "";
+  currentPhase = "main";
+  mainVideo.style.display = "block";
+  mainVideo.play().catch(e => logEvent("main_play_error", String(e.message || e)));
+}
+
+function markBeforeSkipWindow(slot, adId, skipTime) {
+  const from = Math.max(0, skipTime - 1);
+  for (const row of dataRows) {
+    if (
+      row.row_type === "gaze" &&
+      row.ad_slot === slot &&
+      row.ad_id === adId &&
+      typeof row.media_time_sec === "number" &&
+      row.media_time_sec >= from &&
+      row.media_time_sec <= skipTime + 0.001
+    ) {
+      row.before_skip_1s = true;
+    }
+  }
+}
+
+skipButton.addEventListener("click", () => {
+  if (currentPhase.startsWith("ad_") && adVideo.currentTime >= CONFIG.skipAfterSeconds) {
+    skipButton.disabled = true;
+    finishAd("skip");
+  }
+});
+adVideo.addEventListener("ended", () => finishAd("ended"));
+
+mainVideo.addEventListener("timeupdate", () => {
+  if (!experimentStarted || experimentFinished || currentPhase !== "main") return;
+  const t = mainVideo.currentTime;
+  if (!adShown.min3 && t >= CONFIG.adTriggerSeconds.min3) { playAd("min3"); return; }
+  if (!adShown.min6 && t >= CONFIG.adTriggerSeconds.min6) { playAd("min6"); }
+});
+mainVideo.addEventListener("ended", finishExperiment);
+
+function handleGaze(data, webgazerElapsedTime) {
+  if (!data || !experimentStarted || experimentFinished) return;
+  const now = performance.now();
+  if (now - lastGazeSampleAt < CONFIG.sampleIntervalMs) return;
+  lastGazeSampleAt = now;
+  const x = Number(data.x), y = Number(data.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  const activeVideo = currentPhase.startsWith("ad_") ? adVideo : mainVideo;
+  const rect = getVideoContentRect(activeVideo);
+  const inside = pointInRect(x,y,rect);
+  let xvn="", yvn="", zone="outside_video", aoi="outside_video";
+  if (inside) {
+    xvn = clamp((x-rect.left)/rect.width,0,1);
+    yvn = clamp((y-rect.top)/rect.height,0,1);
+    zone = get3x3Zone(xvn,yvn);
+    aoi = "video";
+  }
+  if (isElementVisible(skipButton) && pointInRect(x,y,skipButton.getBoundingClientRect())) {
+    zone = "skip_button";
+    aoi = "skip_button";
+  }
+  dataRows.push({
+    participant_id:participantId, session_id:sessionId,
+    row_type:"gaze", event:"", timestamp_iso:new Date().toISOString(), experiment_elapsed_ms:Math.round(now-experimentStartPerf),
+    phase:currentPhase, ad_slot:currentAdSlot, ad_id:currentAdId,
+    content_file:currentPhase.startsWith("ad_") ? currentAdPath : CONFIG.mainVideo,
+    main_time_sec:round3(mainVideo.currentTime||0), media_time_sec:round3(activeVideo.currentTime||0),
+    gaze_x_px:round2(x), gaze_y_px:round2(y), gaze_x_viewport_norm:round5(x/window.innerWidth), gaze_y_viewport_norm:round5(y/window.innerHeight),
+    gaze_x_video_norm:xvn===""?"":round5(xvn), gaze_y_video_norm:yvn===""?"":round5(yvn), gaze_zone:zone, aoi:aoi,
+    before_skip_1s:false,
+    viewport_width:window.innerWidth, viewport_height:window.innerHeight,
+    video_content_left_px:round2(rect.left), video_content_top_px:round2(rect.top), video_content_width_px:round2(rect.width), video_content_height_px:round2(rect.height),
+    note:`webgazer_elapsed=${Math.round(webgazerElapsedTime||0)}`
+  });
+}
+
+function getVideoContentRect(video) {
+  const r = video.getBoundingClientRect();
+  if (!video.videoWidth || !video.videoHeight || r.width<=0 || r.height<=0) return {left:r.left,top:r.top,width:Math.max(r.width,1),height:Math.max(r.height,1),right:r.right,bottom:r.bottom};
+  const scale = Math.min(r.width/video.videoWidth, r.height/video.videoHeight);
+  const width = video.videoWidth*scale, height = video.videoHeight*scale;
+  const left = r.left+(r.width-width)/2, top = r.top+(r.height-height)/2;
+  return {left,top,width,height,right:left+width,bottom:top+height};
+}
+function get3x3Zone(x,y) {
+  const cols=["left","center","right"], rows=["top","middle","bottom"];
+  return `${rows[Math.min(2,Math.floor(y*3))]}_${cols[Math.min(2,Math.floor(x*3))]}`;
+}
+function logEvent(eventName,note="") {
+  const activeVideo = currentPhase.startsWith("ad_") ? adVideo : mainVideo;
+  const r = getVideoContentRect(activeVideo);
+  const elapsed = experimentStarted ? performance.now()-experimentStartPerf : 0;
+  dataRows.push({
+    participant_id:participantId,session_id:sessionId,
+    row_type:"event",event:eventName,timestamp_iso:new Date().toISOString(),experiment_elapsed_ms:Math.round(elapsed),phase:currentPhase,
+    ad_slot:currentAdSlot,ad_id:currentAdId,content_file:currentPhase.startsWith("ad_")?currentAdPath:CONFIG.mainVideo,
+    main_time_sec:round3(mainVideo.currentTime||0),media_time_sec:round3(activeVideo.currentTime||0),
+    gaze_x_px:"",gaze_y_px:"",gaze_x_viewport_norm:"",gaze_y_viewport_norm:"",gaze_x_video_norm:"",gaze_y_video_norm:"",gaze_zone:"",aoi:"",
+    before_skip_1s:"",
+    viewport_width:window.innerWidth,viewport_height:window.innerHeight,video_content_left_px:round2(r.left),video_content_top_px:round2(r.top),video_content_width_px:round2(r.width),video_content_height_px:round2(r.height),note
+  });
+}
+
+function finishExperiment() {
+  if (experimentFinished) return;
+  const count = dataRows.filter(r=>r.row_type==="gaze").length;
+  logEvent("experiment_end",`samples=${count}`);
+  experimentFinished = true;
+  finishedAtIso = new Date().toISOString();
+  clearInterval(adSkipMonitor);
+  mainVideo.pause(); adVideo.pause(); skipButton.style.display="none";
+  finishOverlay.style.display="flex";
+  uploadStatus.textContent = `送信準備中…（視線データ ${count} 件）`;
+  retryUploadButton.style.display = "none";
+  if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(()=>{});
+  uploadAllData();
+}
+
+retryUploadButton.addEventListener("click", uploadAllData);
+downloadButton.addEventListener("click", downloadCSV);
+
+async function uploadAllData() {
+  if (uploadInProgress || uploadComplete) return;
+  if (!isSupabaseConfigured()) {
+    uploadStatus.textContent = "Supabase設定が未入力のため送信できません。CSVバックアップを保存してください。";
+    retryUploadButton.style.display = "inline-block";
+    return;
+  }
+
+  uploadInProgress = true;
+  retryUploadButton.style.display = "none";
+
+  const gazeRows = dataRows
+    .filter(r => r.row_type === "gaze")
+    .map(toSupabaseGazeRow);
+
+  try {
+    if (!participantUploaded) {
+      uploadStatus.textContent = "参加者情報を送信しています…";
+      await supabaseInsert("participants", buildParticipantSummary());
+      participantUploaded = true;
+    }
+
+    while (uploadedGazeCount < gazeRows.length) {
+      const chunk = gazeRows.slice(uploadedGazeCount, uploadedGazeCount + CONFIG.gazeUploadChunkSize);
+      uploadStatus.textContent = `視線データを送信しています… ${uploadedGazeCount} / ${gazeRows.length}`;
+      await supabaseInsert("gaze_data", chunk);
+      uploadedGazeCount += chunk.length;
+    }
+
+    uploadComplete = true;
+    uploadStatus.textContent = `✓ 送信完了\n参加者ID: ${participantId}\n視線データ: ${gazeRows.length} 件`;
+  } catch (e) {
+    console.error(e);
+    uploadStatus.textContent = `送信に失敗しました。\n${e.message || e}\n\n「送信を再試行」を押してください。改善しない場合はCSVバックアップを保存してください。`;
+    retryUploadButton.style.display = "inline-block";
+  } finally {
+    uploadInProgress = false;
+  }
+}
+
+function buildParticipantSummary() {
+  const gazeCount = dataRows.filter(r=>r.row_type==="gaze").length;
+  return {
+    participant_id: participantId,
+    session_id: sessionId,
+    started_at: startedAtIso,
+    finished_at: finishedAtIso || new Date().toISOString(),
+    start_ad: getAdId(selectedAds.start),
+    min3_ad: getAdId(selectedAds.min3),
+    min6_ad: getAdId(selectedAds.min6),
+    start_ad_skipped: adResults.start.skipped,
+    min3_ad_skipped: adResults.min3.skipped,
+    min6_ad_skipped: adResults.min6.skipped,
+    start_ad_skip_time_sec: adResults.start.skipTime,
+    min3_ad_skip_time_sec: adResults.min3.skipTime,
+    min6_ad_skip_time_sec: adResults.min6.skipTime,
+    gaze_sample_count: gazeCount,
+    user_agent: navigator.userAgent,
+    screen_width: window.screen.width,
+    screen_height: window.screen.height
+  };
+}
+
+function toSupabaseGazeRow(r) {
+  return {
+    session_id: sessionId,
+    participant_id: participantId,
+    timestamp_iso: r.timestamp_iso,
+    experiment_elapsed_ms: nullableNumber(r.experiment_elapsed_ms),
+    phase: nullIfBlank(r.phase),
+    ad_slot: nullIfBlank(r.ad_slot),
+    ad_id: nullIfBlank(r.ad_id),
+    content_file: nullIfBlank(r.content_file),
+    main_time_sec: nullableNumber(r.main_time_sec),
+    media_time_sec: nullableNumber(r.media_time_sec),
+    gaze_x_px: nullableNumber(r.gaze_x_px),
+    gaze_y_px: nullableNumber(r.gaze_y_px),
+    gaze_x_viewport_norm: nullableNumber(r.gaze_x_viewport_norm),
+    gaze_y_viewport_norm: nullableNumber(r.gaze_y_viewport_norm),
+    gaze_x_video_norm: nullableNumber(r.gaze_x_video_norm),
+    gaze_y_video_norm: nullableNumber(r.gaze_y_video_norm),
+    gaze_zone: nullIfBlank(r.gaze_zone),
+    aoi: nullIfBlank(r.aoi),
+    before_skip_1s: Boolean(r.before_skip_1s),
+    viewport_width: nullableNumber(r.viewport_width),
+    viewport_height: nullableNumber(r.viewport_height),
+    video_content_left_px: nullableNumber(r.video_content_left_px),
+    video_content_top_px: nullableNumber(r.video_content_top_px),
+    video_content_width_px: nullableNumber(r.video_content_width_px),
+    video_content_height_px: nullableNumber(r.video_content_height_px)
+  };
+}
+
+async function supabaseInsert(tableName, payload) {
+  const response = await fetch(`${CONFIG.supabaseUrl}/rest/v1/${tableName}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": CONFIG.supabaseKey,
+      "Authorization": "Bearer " + CONFIG.supabaseKey,
+      "Prefer": "return=minimal"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`${tableName} 送信エラー (${response.status}): ${errorText}`);
+  }
+}
+
+function downloadCSV() {
+  const rows=[CSV_COLUMNS.join(","), ...dataRows.map(row=>CSV_COLUMNS.map(c=>csvEscape(row[c]??"")).join(","))];
+  const blob=new Blob(["\uFEFF"+rows.join("\r\n")],{type:"text/csv;charset=utf-8;"});
+  const url=URL.createObjectURL(blob), a=document.createElement("a");
+  const safeId = sanitizeFilename(participantId || "unknown");
+  const adTag = [selectedAds.start,selectedAds.min3,selectedAds.min6].map(p=>p?getAdId(p):"x").join("_");
+  a.href=url;
+  a.download=`eyetracking_${safeId}_${adTag}_${formatDateForFilename(new Date())}.csv`;
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+
+function isSupabaseConfigured() {
+  return /^https:\/\/.+\.supabase\.co\/?$/.test(CONFIG.supabaseUrl)
+    && CONFIG.supabaseKey
+    && !CONFIG.supabaseKey.includes("ここに");
+}
+
+function nullIfBlank(v) {
+  return v === "" || v === undefined ? null : v;
+}
+
+function nullableNumber(v) {
+  if (v === "" || v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function sanitizeFilename(v) {
+  return String(v).replace(/[\\/:*?"<>|]/g, "_").slice(0, 80);
+}
+
+function randomChoice(arr) { const v=new Uint32Array(1); crypto.getRandomValues(v); return arr[v[0]%arr.length]; }
+function getAdId(path) { return path.split("/").pop().replace(/\.[^.]+$/,""); }
+function pointInRect(x,y,r) { return x>=r.left && x<=r.right && y>=r.top && y<=r.bottom; }
+function isElementVisible(el) { const s=getComputedStyle(el); return s.display!=="none" && s.visibility!=="hidden" && s.opacity!=="0"; }
+function clamp(v,min,max) { return Math.min(max,Math.max(min,v)); }
+function round2(v) { return Math.round(v*100)/100; }
+function round3(v) { return Math.round(v*1000)/1000; }
+function round5(v) { return Math.round(v*100000)/100000; }
+function csvEscape(v) { const t=String(v); return /[",\r\n]/.test(t) ? `"${t.replace(/"/g,'""')}"` : t; }
+function formatDateForFilename(d) { const p=n=>String(n).padStart(2,"0"); return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; }
+
+window.addEventListener("beforeunload", e=>{ if ((experimentStarted && !experimentFinished) || (experimentFinished && !uploadComplete)) { e.preventDefault(); e.returnValue=""; } });
+</script>
+</body>
+</html>
